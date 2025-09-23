@@ -7,9 +7,7 @@ import mysql.connector
 from mysql.connector import Error
 import bcrypt
 
-# ------------------------------
-# Config DB (usa variables de entorno; cae a valores por defecto si no están)
-# ------------------------------
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
     "user": os.getenv("DB_USER", "root"),
@@ -18,9 +16,7 @@ DB_CONFIG = {
     "autocommit": False,
 }
 
-# ------------------------------
-# Utilidades
-# ------------------------------
+
 NUMERIC_PATTERN = re.compile(r"^\d+(\.\d{1,2})?$")
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")     # YYYY-MM-DD
 TIME_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}$")     # HH:MM:SS
@@ -52,9 +48,7 @@ def show_info(msg): messagebox.showinfo("Información", msg)
 def show_error(msg): messagebox.showerror("Error", msg)
 def ask_yes_no(msg): return messagebox.askyesno("Confirmar", msg)
 
-# ------------------------------
-# Capa de Datos
-# ------------------------------
+
 class DB:
     def __init__(self):
         self.conn = None
@@ -96,9 +90,7 @@ class DB:
         except:
             pass
 
-# ------------------------------
-# Ventanas / Vistas
-# ------------------------------
+z
 class LoginView(ttk.Frame):
     def __init__(self, master, db: DB, on_success):
         super().__init__(master, padding=20)
@@ -656,9 +648,7 @@ class CitasView(BaseCRUDWindow):
         self.entry_fecha.delete(0, tk.END); self.entry_fecha.insert(0, v[3])
         self.entry_hora.delete(0, tk.END); self.entry_hora.insert(0, v[4])
 
-# ------------------------------
-# App
-# ------------------------------
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
