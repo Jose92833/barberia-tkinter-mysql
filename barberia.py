@@ -1,397 +1,688 @@
+import os
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from PIL import Image, ImageTk
 import mysql.connector
-import os
+from mysql.connector import Error
+import bcrypt
 
-conexion = mysql.connector.connect(
-    host="localhost",
-    user="root",
-    password="arroyolorenzo04*A",
-    database="barberia"
-)
-cursor = conexion.cursor()
+# ------------------------------
+# Config DB (usa variables de entorno; cae a valores por defecto si no están)
+# ------------------------------
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "arroyolorenzo04*A"),  # <-- cambia/usa ENV
+    "database": os.getenv("DB_NAME", "barberia"),
+    "autocommit": False,
+}
 
-def configurar_estilos():
+# ------------------------------
+# Utilidades
+# ------------------------------
+NUMERIC_PATTERN = re.compile(r"^\d+(\.\d{1,2})?$")
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")     # YYYY-MM-DD
+TIME_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}$")     # HH:MM:SS
+
+def is_bcrypt_hash(value: str) -> bool:
+    return isinstance(value, str) and value.startswith("$2")
+
+def safe_float(text: str):
+    if text and NUMERIC_PATTERN.match(text.strip()):
+        return float(text)
+    return None
+
+def configure_styles():
     style = ttk.Style()
-    style.theme_use("clam")
-    style.configure("TButton", font=("Segoe UI", 11, "bold"), padding=8, relief="flat", background="#1976D2", foreground="white")
-    style.map("TButton", background=[("active", "#1565C0")])
-    style.configure("TLabel", font=("Segoe UI", 11), background="#ECEFF1", foreground="#212121")
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure("TButton", font=("Segoe UI", 11, "bold"), padding=8)
+    style.map("TButton",
+              relief=[("pressed", "sunken"), ("!pressed", "flat")])
+    style.configure("TLabel", font=("Segoe UI", 11))
     style.configure("TEntry", font=("Segoe UI", 11), padding=5)
     style.configure("TCombobox", font=("Segoe UI", 11), padding=5)
-    style.configure("Treeview", font=("Segoe UI", 10), background="white", fieldbackground="white", rowheight=25)
-    style.configure("Treeview.Heading", font=("Segoe UI", 11, "bold"), background="#1976D2", foreground="white")
+    style.configure("Treeview", font=("Segoe UI", 10), rowheight=25)
+    style.configure("Treeview.Heading", font=("Segoe UI", 11, "bold"))
 
-def login():
-    usuario = entry_user.get()
-    contrasena = entry_pass.get()
-    if usuario and contrasena:
-        cursor.execute("SELECT * FROM usuarios WHERE username=%s AND password=%s", (usuario, contrasena))
-        result = cursor.fetchone()
-        if result:
-            messagebox.showinfo("Éxito", f"Bienvenido {usuario}")
-            abrir_menu()
-        else:
-            messagebox.showerror("Error", "Usuario o contraseña incorrectos")
-    else:
-        messagebox.showwarning("Error", "Debe llenar todos los campos")
+def show_info(msg): messagebox.showinfo("Información", msg)
+def show_error(msg): messagebox.showerror("Error", msg)
+def ask_yes_no(msg): return messagebox.askyesno("Confirmar", msg)
 
-def abrir_menu():
-    login_win.destroy()
-    menu_win = tk.Tk()
-    menu_win.title("Barbería El Mapache Bigotón - Menú Principal")
-    menu_win.geometry("500x450")
-    menu_win.configure(bg="#ECEFF1")
-    lbl_title = tk.Label(menu_win, text="Menú Principal", font=("Segoe UI", 20, "bold"), bg="#ECEFF1", fg="#0D47A1")
-    lbl_title.pack(pady=20)
-    ttk.Button(menu_win, text="😎 Clientes", command=abrir_clientes, width=30).pack(pady=12)
-    ttk.Button(menu_win, text="💈 Servicios", command=abrir_servicios, width=30).pack(pady=12)
-    ttk.Button(menu_win, text="✂️ Cortes", command=abrir_cortes, width=30).pack(pady=12)
-    ttk.Button(menu_win, text="📅 Citas", command=abrir_citas, width=30).pack(pady=12)
-    menu_win.mainloop()
+# ------------------------------
+# Capa de Datos
+# ------------------------------
+class DB:
+    def __init__(self):
+        self.conn = None
+        self.cursor = None
+        self.connect()
 
-def abrir_clientes():
-    win = tk.Toplevel()
-    win.title("Gestión de Clientes")
-    win.configure(bg="#ECEFF1")
-    ttk.Label(win, text="Nombre:").grid(row=0, column=0, padx=5, pady=5)
-    entry_nombre = ttk.Entry(win)
-    entry_nombre.grid(row=0, column=1, padx=5, pady=5)
-    ttk.Label(win, text="Teléfono:").grid(row=1, column=0, padx=5, pady=5)
-    entry_telefono = ttk.Entry(win)
-    entry_telefono.grid(row=1, column=1, padx=5, pady=5)
+    def connect(self):
+        try:
+            self.conn = mysql.connector.connect(**DB_CONFIG)
+            self.cursor = self.conn.cursor()
+        except Error as e:
+            show_error(f"No se pudo conectar a la BD: {e}")
+            raise
 
-    def agregar_cliente():
-        nombre = entry_nombre.get()
-        telefono = entry_telefono.get()
-        if nombre and telefono:
-            cursor.execute("INSERT INTO clientes (nombre, telefono) VALUES (%s, %s)", (nombre, telefono))
-            conexion.commit()
-            cargar_clientes()
+    def execute(self, query, params=None, commit=False, many=False):
+        try:
+            if many:
+                self.cursor.executemany(query, params or [])
+            else:
+                self.cursor.execute(query, params or ())
+            if commit:
+                self.conn.commit()
+        except Error as e:
+            if self.conn:
+                self.conn.rollback()
+            show_error(f"Error de BD: {e}")
+            raise
 
-    def actualizar_cliente():
-        selected = tree.selection()
-        if selected:
-            cliente_id = tree.item(selected[0])['values'][0]
-            nombre = entry_nombre.get()
-            telefono = entry_telefono.get()
-            if nombre and telefono:
-                cursor.execute("UPDATE clientes SET nombre=%s, telefono=%s WHERE id=%s", (nombre, telefono, cliente_id))
-                conexion.commit()
-                cargar_clientes()
+    def fetchone(self):
+        return self.cursor.fetchone()
 
-    def eliminar_cliente():
-        selected = tree.selection()
-        if selected:
-            cliente_id = tree.item(selected[0])['values'][0]
-            cursor.execute("DELETE FROM clientes WHERE id=%s", (cliente_id,))
-            conexion.commit()
-            cargar_clientes()
+    def fetchall(self):
+        return self.cursor.fetchall()
 
-    ttk.Button(win, text="Agregar", command=agregar_cliente).grid(row=2, column=0, pady=10)
-    ttk.Button(win, text="Actualizar", command=actualizar_cliente).grid(row=2, column=1, pady=10)
-    ttk.Button(win, text="Eliminar", command=eliminar_cliente).grid(row=2, column=2, pady=10)
+    def close(self):
+        try:
+            if self.cursor: self.cursor.close()
+            if self.conn: self.conn.close()
+        except:
+            pass
 
-    tree = ttk.Treeview(win, columns=("ID", "Nombre", "Teléfono"), show="headings")
-    tree.heading("ID", text="ID")
-    tree.heading("Nombre", text="Nombre")
-    tree.heading("Teléfono", text="Teléfono")
-    tree.grid(row=3, column=0, columnspan=3, padx=5, pady=10)
+# ------------------------------
+# Ventanas / Vistas
+# ------------------------------
+class LoginView(ttk.Frame):
+    def __init__(self, master, db: DB, on_success):
+        super().__init__(master, padding=20)
+        self.db = db
+        self.on_success = on_success
 
-    def cargar_clientes():
-        for row in tree.get_children():
-            tree.delete(row)
-        cursor.execute("SELECT * FROM clientes")
-        for row in cursor.fetchall():
-            tree.insert("", tk.END, values=row)
+        tk.Label(self, text="🔑 Iniciar Sesión",
+                 font=("Segoe UI", 18, "bold")).pack(pady=10)
 
-    def seleccionar_cliente(event):
-        selected = tree.selection()
-        if selected:
-            item = tree.item(selected[0])
-            entry_nombre.delete(0, tk.END)
-            entry_nombre.insert(0, item['values'][1])
-            entry_telefono.delete(0, tk.END)
-            entry_telefono.insert(0, item['values'][2])
+        ttk.Label(self, text="Usuario:").pack(anchor="w")
+        self.entry_user = ttk.Entry(self, width=30)
+        self.entry_user.pack(pady=5)
 
-    tree.bind("<<TreeviewSelect>>", seleccionar_cliente)
-    cargar_clientes()
+        ttk.Label(self, text="Contraseña:").pack(anchor="w")
+        self.entry_pass = ttk.Entry(self, show="*", width=30)
+        self.entry_pass.pack(pady=5)
 
-def abrir_servicios():
-    win = tk.Toplevel()
-    win.title("Gestión de Servicios")
-    win.configure(bg="#344149")
-    ttk.Label(win, text="Descripción:").grid(row=0, column=0, padx=5, pady=5)
-    entry_servicio = ttk.Entry(win)
-    entry_servicio.grid(row=0, column=1, padx=5, pady=5)
-    ttk.Label(win, text="Costo:").grid(row=1, column=0, padx=5, pady=5)
-    entry_costo = ttk.Entry(win)
-    entry_costo.grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(self, text="Ingresar", command=self.login).pack(pady=15)
 
-    def agregar_servicio():
-        descripcion = entry_servicio.get()
-        costo = entry_costo.get()
-        if descripcion and costo:
-            cursor.execute("INSERT INTO servicios (descripcion, costo) VALUES (%s, %s)", (descripcion, costo))
-            conexion.commit()
-            cargar_servicios()
+    def login(self):
+        usuario = self.entry_user.get().strip()
+        contrasena = self.entry_pass.get()
 
-    def actualizar_servicio():
-        selected = tree.selection()
-        if selected:
-            servicio_id = tree.item(selected[0])['values'][0]
-            descripcion = entry_servicio.get()
-            costo = entry_costo.get()
-            if descripcion and costo:
-                cursor.execute("UPDATE servicios SET descripcion=%s, costo=%s WHERE id=%s", (descripcion, costo, servicio_id))
-                conexion.commit()
-                cargar_servicios()
+        if not usuario or not contrasena:
+            show_error("Debe llenar todos los campos.")
+            return
 
-    def eliminar_servicio():
-        selected = tree.selection()
-        if selected:
-            servicio_id = tree.item(selected[0])['values'][0]
-            cursor.execute("DELETE FROM servicios WHERE id=%s", (servicio_id,))
-            conexion.commit()
-            cargar_servicios()
+        try:
+            self.db.execute("SELECT username, password FROM usuarios WHERE username=%s", (usuario,))
+            row = self.db.fetchone()
+            if not row:
+                show_error("Usuario o contraseña incorrectos.")
+                return
 
-    ttk.Button(win, text="Agregar", command=agregar_servicio).grid(row=2, column=0, pady=10)
-    ttk.Button(win, text="Actualizar", command=actualizar_servicio).grid(row=2, column=1, pady=10)
-    ttk.Button(win, text="Eliminar", command=eliminar_servicio).grid(row=2, column=2, pady=10)
+            _, stored = row
+            ok = False
+            if is_bcrypt_hash(stored):
+                try:
+                    ok = bcrypt.checkpw(contrasena.encode("utf-8"), stored.encode("utf-8"))
+                except Exception:
+                    ok = False
+            else:
+                ok = (contrasena == stored)
 
-    tree = ttk.Treeview(win, columns=("ID", "Descripción", "Costo"), show="headings")
-    tree.heading("ID", text="ID")
-    tree.heading("Descripción", text="Descripción")
-    tree.heading("Costo", text="Costo")
-    tree.grid(row=3, column=0, columnspan=3, padx=5, pady=10)
+            if ok:
+                show_info(f"Bienvenido {usuario}")
+                self.on_success()
+            else:
+                show_error("Usuario o contraseña incorrectos.")
+        except Exception:
+            pass
 
-    def cargar_servicios():
-        for row in tree.get_children():
-            tree.delete(row)
-        cursor.execute("SELECT * FROM servicios")
-        for row in cursor.fetchall():
-            tree.insert("", tk.END, values=row)
+class MenuView(tk.Toplevel):
+    def __init__(self, master, db: DB):
+        super().__init__(master)
+        self.db = db
+        self.title("Barbería El Mapache Bigotón - Menú Principal")
+        self.geometry("460x420")
+        self.configure(padx=20, pady=20)
 
-    def seleccionar_servicio(event):
-        selected = tree.selection()
-        if selected:
-            item = tree.item(selected[0])
-            entry_servicio.delete(0, tk.END)
-            entry_servicio.insert(0, item['values'][1])
-            entry_costo.delete(0, tk.END)
-            entry_costo.insert(0, item['values'][2])
+        tk.Label(self, text="Menú Principal", font=("Segoe UI", 20, "bold")).pack(pady=12)
+        ttk.Button(self, text="😎 Clientes", command=self.open_clientes, width=30).pack(pady=8)
+        ttk.Button(self, text="💈 Servicios", command=self.open_servicios, width=30).pack(pady=8)
+        ttk.Button(self, text="✂️ Cortes", command=self.open_cortes, width=30).pack(pady=8)
+        ttk.Button(self, text="📅 Citas", command=self.open_citas, width=30).pack(pady=8)
 
-    tree.bind("<<TreeviewSelect>>", seleccionar_servicio)
-    cargar_servicios()
+    def open_clientes(self): ClientesView(self, self.db)
+    def open_servicios(self): ServiciosView(self, self.db)
+    def open_cortes(self): CortesView(self, self.db)
+    def open_citas(self): CitasView(self, self.db)
 
-def abrir_cortes():
-    win = tk.Toplevel()
-    win.title("Catálogo de Cortes")
-    win.configure(bg="#ECEFF1")
+class BaseCRUDWindow(tk.Toplevel):
+    def __init__(self, master, db: DB, title):
+        super().__init__(master)
+        self.db = db
+        self.title(title)
+        self.configure(padx=16, pady=16)
+        self.grid_columnconfigure(1, weight=1)
 
-    ttk.Label(win, text="Nombre del Corte:").grid(row=0, column=0, padx=5, pady=5)
-    entry_corte = ttk.Entry(win)
-    entry_corte.grid(row=0, column=1, padx=5, pady=5)
+        # Tree + scrollbar
+        self.tree = None
+        self._add_tree_area()
 
-    ttk.Label(win, text="Precio:").grid(row=1, column=0, padx=5, pady=5)
-    entry_precio = ttk.Entry(win)
-    entry_precio.grid(row=1, column=1, padx=5, pady=5)
+    def _add_tree_area(self):
+        frame = ttk.Frame(self)
+        frame.grid(row=99, column=0, columnspan=3, sticky="nsew", pady=(10,0))
+        self.grid_rowconfigure(99, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=1)
 
-    img_label = tk.Label(win, bg="#ECEFF1")
-    img_label.grid(row=0, column=2, rowspan=3, padx=10, pady=5)
-    img_path_var = tk.StringVar()
+        self.tree = ttk.Treeview(frame, show="headings", selectmode="browse")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
 
-    def seleccionar_imagen():
-        path = filedialog.askopenfilename(filetypes=[("Archivos de imagen", "*.jpg *.png *.jpeg")])
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+class ClientesView(BaseCRUDWindow):
+    def __init__(self, master, db: DB):
+        super().__init__(master, db, "Gestión de Clientes")
+
+        ttk.Label(self, text="Nombre:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.entry_nombre = ttk.Entry(self)
+        self.entry_nombre.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(self, text="Teléfono:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.entry_telefono = ttk.Entry(self)
+        self.entry_telefono.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Button(self, text="Agregar", command=self.agregar).grid(row=2, column=0, pady=8)
+        ttk.Button(self, text="Actualizar", command=self.actualizar).grid(row=2, column=1, pady=8)
+        ttk.Button(self, text="Eliminar", command=self.eliminar).grid(row=2, column=2, pady=8)
+
+        self.tree["columns"] = ("ID", "Nombre", "Teléfono")
+        for col, w in [("ID", 60), ("Nombre", 180), ("Teléfono", 140)]:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=w, anchor="center")
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+        self.cargar()
+
+    def cargar(self):
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        try:
+            self.db.execute("SELECT id, nombre, telefono FROM clientes")
+            for row in self.db.fetchall():
+                self.tree.insert("", tk.END, values=row)
+        except Exception:
+            pass
+
+    def on_select(self, _):
+        sel = self.tree.selection()
+        if not sel: return
+        v = self.tree.item(sel[0])["values"]
+        self.entry_nombre.delete(0, tk.END)
+        self.entry_nombre.insert(0, v[1])
+        self.entry_telefono.delete(0, tk.END)
+        self.entry_telefono.insert(0, v[2])
+
+    def agregar(self):
+        nombre = self.entry_nombre.get().strip()
+        tel = self.entry_telefono.get().strip()
+        if not nombre or not tel:
+            show_error("Nombre y teléfono son obligatorios.")
+            return
+        try:
+            self.db.execute("INSERT INTO clientes (nombre, telefono) VALUES (%s, %s)", (nombre, tel), commit=True)
+            show_info("Cliente agregado.")
+            self.cargar()
+        except Exception:
+            pass
+
+    def actualizar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione un cliente.")
+            return
+        cid = self.tree.item(sel[0])["values"][0]
+        nombre = self.entry_nombre.get().strip()
+        tel = self.entry_telefono.get().strip()
+        if not nombre or not tel:
+            show_error("Nombre y teléfono son obligatorios.")
+            return
+        try:
+            self.db.execute("UPDATE clientes SET nombre=%s, telefono=%s WHERE id=%s", (nombre, tel, cid), commit=True)
+            show_info("Cliente actualizado.")
+            self.cargar()
+        except Exception:
+            pass
+
+    def eliminar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione un cliente.")
+            return
+        cid = self.tree.item(sel[0])["values"][0]
+        if not ask_yes_no("¿Eliminar cliente seleccionado?"):
+            return
+        try:
+            self.db.execute("DELETE FROM clientes WHERE id=%s", (cid,), commit=True)
+            show_info("Cliente eliminado.")
+            self.cargar()
+        except Exception:
+            pass
+
+class ServiciosView(BaseCRUDWindow):
+    def __init__(self, master, db: DB):
+        super().__init__(master, db, "Gestión de Servicios")
+
+        ttk.Label(self, text="Descripción:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.entry_desc = ttk.Entry(self)
+        self.entry_desc.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(self, text="Costo:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.entry_costo = ttk.Entry(self)
+        self.entry_costo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Button(self, text="Agregar", command=self.agregar).grid(row=2, column=0, pady=8)
+        ttk.Button(self, text="Actualizar", command=self.actualizar).grid(row=2, column=1, pady=8)
+        ttk.Button(self, text="Eliminar", command=self.eliminar).grid(row=2, column=2, pady=8)
+
+        self.tree["columns"] = ("ID", "Descripción", "Costo")
+        for col, w in [("ID", 60), ("Descripción", 200), ("Costo", 100)]:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=w, anchor="center")
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+        self.cargar()
+
+    def cargar(self):
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        try:
+            self.db.execute("SELECT id, descripcion, costo FROM servicios")
+            for row in self.db.fetchall():
+                self.tree.insert("", tk.END, values=row)
+        except Exception:
+            pass
+
+    def on_select(self, _):
+        sel = self.tree.selection()
+        if not sel: return
+        v = self.tree.item(sel[0])["values"]
+        self.entry_desc.delete(0, tk.END)
+        self.entry_desc.insert(0, v[1])
+        self.entry_costo.delete(0, tk.END)
+        self.entry_costo.insert(0, v[2])
+
+    def agregar(self):
+        desc = self.entry_desc.get().strip()
+        costo = self.entry_costo.get().strip()
+        val = safe_float(costo)
+        if not desc or val is None:
+            show_error("Descripción obligatoria y costo numérico válido (ej. 120 o 120.50).")
+            return
+        try:
+            self.db.execute("INSERT INTO servicios (descripcion, costo) VALUES (%s, %s)", (desc, val), commit=True)
+            show_info("Servicio agregado.")
+            self.cargar()
+        except Exception:
+            pass
+
+    def actualizar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione un servicio.")
+            return
+        sid = self.tree.item(sel[0])["values"][0]
+        desc = self.entry_desc.get().strip()
+        costo = self.entry_costo.get().strip()
+        val = safe_float(costo)
+        if not desc or val is None:
+            show_error("Descripción obligatoria y costo numérico válido.")
+            return
+        try:
+            self.db.execute("UPDATE servicios SET descripcion=%s, costo=%s WHERE id=%s", (desc, val, sid), commit=True)
+            show_info("Servicio actualizado.")
+            self.cargar()
+        except Exception:
+            pass
+
+    def eliminar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione un servicio.")
+            return
+        sid = self.tree.item(sel[0])["values"][0]
+        if not ask_yes_no("¿Eliminar servicio seleccionado?"):
+            return
+        try:
+            self.db.execute("DELETE FROM servicios WHERE id=%s", (sid,), commit=True)
+            show_info("Servicio eliminado.")
+            self.cargar()
+        except Exception:
+            pass
+
+class CortesView(BaseCRUDWindow):
+    def __init__(self, master, db: DB):
+        super().__init__(master, db, "Catálogo de Cortes")
+
+        ttk.Label(self, text="Nombre del Corte:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.entry_nombre = ttk.Entry(self)
+        self.entry_nombre.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(self, text="Precio:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.entry_precio = ttk.Entry(self)
+        self.entry_precio.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        self.img_label = tk.Label(self)
+        self.img_label.grid(row=0, column=2, rowspan=3, padx=10, pady=5)
+        self.img_path = tk.StringVar()
+
+        ttk.Button(self, text="Seleccionar Foto", command=self.seleccionar_imagen).grid(row=2, column=1, pady=5, sticky="w")
+
+        ttk.Button(self, text="Agregar", command=self.agregar).grid(row=3, column=0, pady=8)
+        ttk.Button(self, text="Actualizar", command=self.actualizar).grid(row=3, column=1, pady=8)
+        ttk.Button(self, text="Eliminar", command=self.eliminar).grid(row=3, column=2, pady=8)
+
+        self.tree["columns"] = ("ID", "Nombre", "Precio", "Foto")
+        for col, w in [("ID", 60), ("Nombre", 160), ("Precio", 100), ("Foto", 240)]:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=w, anchor="center")
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+        self.cargar()
+
+    def seleccionar_imagen(self):
+        path = filedialog.askopenfilename(filetypes=[("Imágenes", "*.jpg *.jpeg *.png")])
         if path:
-            img_path_var.set(path)
-            img = Image.open(path).resize((100,100))
-            img = ImageTk.PhotoImage(img)
-            img_label.config(image=img)
-            img_label.image = img
+            self.img_path.set(path)
+            try:
+                img = Image.open(path).resize((120, 120))
+                self.img_label.image = ImageTk.PhotoImage(img)
+                self.img_label.config(image=self.img_label.image)
+            except Exception as e:
+                show_error(f"No se pudo cargar la imagen: {e}")
 
-    ttk.Button(win, text="Seleccionar Foto", command=seleccionar_imagen).grid(row=2, column=1, pady=5)
+    def cargar(self):
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        try:
+            self.db.execute("SELECT id, nombre, precio, foto FROM cortes")
+            for row in self.db.fetchall():
+                self.tree.insert("", tk.END, values=row)
+        except Exception:
+            pass
 
-    def agregar_corte():
-        nombre = entry_corte.get()
-        precio = entry_precio.get()
-        foto = img_path_var.get()
-        if nombre and precio and foto:
-            cursor.execute("INSERT INTO cortes (nombre, precio, foto) VALUES (%s, %s, %s)", (nombre, precio, foto))
-            conexion.commit()
-            cargar_cortes()
+    def on_select(self, _):
+        sel = self.tree.selection()
+        if not sel: return
+        v = self.tree.item(sel[0])["values"]
+        self.entry_nombre.delete(0, tk.END)
+        self.entry_nombre.insert(0, v[1])
+        self.entry_precio.delete(0, tk.END)
+        self.entry_precio.insert(0, v[2])
+        foto_path = v[3]
+        self.img_path.set(foto_path)
+        if foto_path and os.path.exists(foto_path):
+            try:
+                img = Image.open(foto_path).resize((120, 120))
+                self.img_label.image = ImageTk.PhotoImage(img)
+                self.img_label.config(image=self.img_label.image)
+            except Exception:
+                self.img_label.config(image="")
+                self.img_label.image = None
+        else:
+            self.img_label.config(image="")
+            self.img_label.image = None
 
-    def actualizar_corte():
-        selected = tree.selection()
-        if selected:
-            corte_id = tree.item(selected[0])['values'][0]
-            nombre = entry_corte.get()
-            precio = entry_precio.get()
-            foto = img_path_var.get()
-            if nombre and precio and foto:
-                cursor.execute("UPDATE cortes SET nombre=%s, precio=%s, foto=%s WHERE id=%s", (nombre, precio, foto, corte_id))
-                conexion.commit()
-                cargar_cortes()
+    def agregar(self):
+        nombre = self.entry_nombre.get().strip()
+        precio = self.entry_precio.get().strip()
+        val = safe_float(precio)
+        foto = self.img_path.get().strip()
+        if not nombre or val is None or not foto:
+            show_error("Nombre, precio numérico y foto son obligatorios.")
+            return
+        try:
+            self.db.execute("INSERT INTO cortes (nombre, precio, foto) VALUES (%s, %s, %s)", (nombre, val, foto), commit=True)
+            show_info("Corte agregado.")
+            self.cargar()
+        except Exception:
+            pass
 
-    def eliminar_corte():
-        selected = tree.selection()
-        if selected:
-            corte_id = tree.item(selected[0])['values'][0]
-            cursor.execute("DELETE FROM cortes WHERE id=%s", (corte_id,))
-            conexion.commit()
-            cargar_cortes()
+    def actualizar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione un corte.")
+            return
+        cid = self.tree.item(sel[0])["values"][0]
+        nombre = self.entry_nombre.get().strip()
+        precio = self.entry_precio.get().strip()
+        val = safe_float(precio)
+        foto = self.img_path.get().strip()
+        if not nombre or val is None or not foto:
+            show_error("Nombre, precio numérico y foto son obligatorios.")
+            return
+        try:
+            self.db.execute("UPDATE cortes SET nombre=%s, precio=%s, foto=%s WHERE id=%s", (nombre, val, foto, cid), commit=True)
+            show_info("Corte actualizado.")
+            self.cargar()
+        except Exception:
+            pass
 
-    ttk.Button(win, text="Agregar", command=agregar_corte).grid(row=3, column=0, pady=10)
-    ttk.Button(win, text="Actualizar", command=actualizar_corte).grid(row=3, column=1, pady=10)
-    ttk.Button(win, text="Eliminar", command=eliminar_corte).grid(row=3, column=2, pady=10)
+    def eliminar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione un corte.")
+            return
+        cid = self.tree.item(sel[0])["values"][0]
+        if not ask_yes_no("¿Eliminar corte seleccionado?"):
+            return
+        try:
+            self.db.execute("DELETE FROM cortes WHERE id=%s", (cid,), commit=True)
+            show_info("Corte eliminado.")
+            self.cargar()
+        except Exception:
+            pass
 
-    tree = ttk.Treeview(win, columns=("ID", "Nombre", "Precio", "Foto"), show="headings")
-    tree.heading("ID", text="ID")
-    tree.heading("Nombre", text="Nombre")
-    tree.heading("Precio", text="Precio")
-    tree.heading("Foto", text="Foto")
-    tree.grid(row=4, column=0, columnspan=3, padx=5, pady=10)
+class CitasView(BaseCRUDWindow):
+    def __init__(self, master, db: DB):
+        super().__init__(master, db, "Gestión de Citas")
 
-    def cargar_cortes():
-        for row in tree.get_children():
-            tree.delete(row)
-        cursor.execute("SELECT * FROM cortes")
-        for row in cursor.fetchall():
-            tree.insert("", tk.END, values=row)
+        ttk.Label(self, text="Cliente:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.combo_cliente = ttk.Combobox(self, state="readonly")
+        self.combo_cliente.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
-    def seleccionar_corte(event):
-        selected = tree.selection()
-        if selected:
-            item = tree.item(selected[0])
-            entry_corte.delete(0, tk.END)
-            entry_corte.insert(0, item['values'][1])
-            entry_precio.delete(0, tk.END)
-            entry_precio.insert(0, item['values'][2])
-            foto_path = item['values'][3]
-            img_path_var.set(foto_path)
-            if foto_path and os.path.exists(foto_path):
-                img = Image.open(foto_path).resize((100,100))
-                img = ImageTk.PhotoImage(img)
-                img_label.config(image=img)
-                img_label.image = img
+        ttk.Label(self, text="Servicio:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.combo_servicio = ttk.Combobox(self, state="readonly")
+        self.combo_servicio.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
-    tree.bind("<<TreeviewSelect>>", seleccionar_corte)
-    cargar_cortes()
+        ttk.Label(self, text="Fecha (aaaa-mm-dd):").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+        self.entry_fecha = ttk.Entry(self)
+        self.entry_fecha.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
 
-def abrir_citas():
-    win = tk.Toplevel()
-    win.title("Gestión de Citas")
-    win.configure(bg="#ECEFF1")
+        ttk.Label(self, text="Hora (hh:mm:ss):").grid(row=3, column=0, padx=5, pady=5, sticky="e")
+        self.entry_hora = ttk.Entry(self)
+        self.entry_hora.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
-    ttk.Label(win, text="Cliente:").grid(row=0, column=0, padx=5, pady=5)
-    combo_cliente = ttk.Combobox(win)
-    combo_cliente.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(self, text="Agendar", command=self.agendar).grid(row=4, column=0, pady=8)
+        ttk.Button(self, text="Actualizar", command=self.actualizar).grid(row=4, column=1, pady=8)
+        ttk.Button(self, text="Eliminar", command=self.eliminar).grid(row=4, column=2, pady=8)
 
-    ttk.Label(win, text="Servicio:").grid(row=1, column=0, padx=5, pady=5)
-    combo_servicio = ttk.Combobox(win)
-    combo_servicio.grid(row=1, column=1, padx=5, pady=5)
+        self.tree["columns"] = ("ID", "Cliente", "Servicio", "Fecha", "Hora")
+        for col, w in [("ID", 60), ("Cliente", 160), ("Servicio", 180), ("Fecha", 100), ("Hora", 90)]:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=w, anchor="center")
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
 
-    ttk.Label(win, text="Fecha (aaaa-mm-dd):").grid(row=2, column=0, padx=5, pady=5)
-    entry_fecha = ttk.Entry(win)
-    entry_fecha.grid(row=2, column=1, padx=5, pady=5)
+        self.recargar_combos()
+        self.cargar()
 
-    ttk.Label(win, text="Hora (hh:mm:ss):").grid(row=3, column=0, padx=5, pady=5)
-    entry_hora = ttk.Entry(win)
-    entry_hora.grid(row=3, column=1, padx=5, pady=5)
+    def recargar_combos(self):
+        try:
+            self.db.execute("SELECT nombre FROM clientes")
+            clientes = [r[0] for r in self.db.fetchall()]
+            self.combo_cliente["values"] = clientes
 
-    def agendar_cita():
-        cliente = combo_cliente.get()
-        servicio = combo_servicio.get()
-        fecha = entry_fecha.get()
-        hora = entry_hora.get()
-        if cliente and servicio and fecha and hora:
-            cursor.execute("SELECT id FROM clientes WHERE nombre=%s", (cliente,))
-            cliente_id = cursor.fetchone()[0]
-            cursor.execute("SELECT id FROM servicios WHERE descripcion=%s", (servicio,))
-            servicio_id = cursor.fetchone()[0]
-            cursor.execute("INSERT INTO citas (cliente_id, servicio_id, fecha, hora) VALUES (%s,%s,%s,%s)", (cliente_id, servicio_id, fecha, hora))
-            conexion.commit()
-            cargar_citas()
+            self.db.execute("SELECT descripcion FROM servicios")
+            servicios = [r[0] for r in self.db.fetchall()]
+            self.combo_servicio["values"] = servicios
+        except Exception:
+            self.combo_cliente["values"] = []
+            self.combo_servicio["values"] = []
 
-    def eliminar_cita():
-        selected = tree.selection()
-        if selected:
-            cita_id = tree.item(selected[0])['values'][0]
-            cursor.execute("DELETE FROM citas WHERE id=%s", (cita_id,))
-            conexion.commit()
-            cargar_citas()
+    def cargar(self):
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        try:
+            self.db.execute("""
+                SELECT c.id, cl.nombre, s.descripcion, c.fecha, c.hora
+                FROM citas c
+                JOIN clientes cl ON c.cliente_id = cl.id
+                JOIN servicios s ON c.servicio_id = s.id
+                ORDER BY c.fecha DESC, c.hora DESC
+            """)
+            for row in self.db.fetchall():
+                self.tree.insert("", tk.END, values=row)
+        except Exception:
+            pass
 
-    def actualizar_cita():
-        selected = tree.selection()
-        if selected:
-            cita_id = tree.item(selected[0])['values'][0]
-            cliente = combo_cliente.get()
-            servicio = combo_servicio.get()
-            fecha = entry_fecha.get()
-            hora = entry_hora.get()
-            cursor.execute("SELECT id FROM clientes WHERE nombre=%s", (cliente,))
-            cliente_id = cursor.fetchone()[0]
-            cursor.execute("SELECT id FROM servicios WHERE descripcion=%s", (servicio,))
-            servicio_id = cursor.fetchone()[0]
-            cursor.execute("UPDATE citas SET cliente_id=%s, servicio_id=%s, fecha=%s, hora=%s WHERE id=%s",
-                           (cliente_id, servicio_id, fecha, hora, cita_id))
-            conexion.commit()
-            cargar_citas()
+    def _resolve_cliente_id(self, nombre: str):
+        self.db.execute("SELECT id FROM clientes WHERE nombre=%s", (nombre,))
+        row = self.db.fetchone()
+        return row[0] if row else None
 
-    ttk.Button(win, text="Agendar", command=agendar_cita).grid(row=4, column=0, pady=10)
-    ttk.Button(win, text="Actualizar", command=actualizar_cita).grid(row=4, column=1, pady=10)
-    ttk.Button(win, text="Eliminar", command=eliminar_cita).grid(row=4, column=2, pady=10)
+    def _resolve_servicio_id(self, desc: str):
+        self.db.execute("SELECT id FROM servicios WHERE descripcion=%s", (desc,))
+        row = self.db.fetchone()
+        return row[0] if row else None
 
-    tree = ttk.Treeview(win, columns=("ID", "Cliente", "Servicio", "Fecha", "Hora"), show="headings")
-    tree.heading("ID", text="ID")
-    tree.heading("Cliente", text="Cliente")
-    tree.heading("Servicio", text="Servicio")
-    tree.heading("Fecha", text="Fecha")
-    tree.heading("Hora", text="Hora")
-    tree.grid(row=5, column=0, columnspan=3, padx=5, pady=10)
+    def agendar(self):
+        cliente = self.combo_cliente.get().strip()
+        servicio = self.combo_servicio.get().strip()
+        fecha = self.entry_fecha.get().strip()
+        hora = self.entry_hora.get().strip()
 
-    def cargar_citas():
-        for row in tree.get_children():
-            tree.delete(row)
-        cursor.execute("""
-            SELECT c.id, cl.nombre, s.descripcion, c.fecha, c.hora
-            FROM citas c
-            JOIN clientes cl ON c.cliente_id = cl.id
-            JOIN servicios s ON c.servicio_id = s.id
-        """)
-        for row in cursor.fetchall():
-            tree.insert("", tk.END, values=row)
+        if not cliente or not servicio or not DATE_PATTERN.match(fecha) or not TIME_PATTERN.match(hora):
+            show_error("Complete Cliente, Servicio, Fecha (AAAA-MM-DD) y Hora (HH:MM:SS).")
+            return
 
-    def seleccionar_cita(event):
-        selected = tree.selection()
-        if selected:
-            item = tree.item(selected[0])
-            combo_cliente.set(item['values'][1])
-            combo_servicio.set(item['values'][2])
-            entry_fecha.delete(0, tk.END)
-            entry_fecha.insert(0, item['values'][3])
-            entry_hora.delete(0, tk.END)
-            entry_hora.insert(0, item['values'][4])
+        try:
+            cid = self._resolve_cliente_id(cliente)
+            sid = self._resolve_servicio_id(servicio)
+            if not cid or not sid:
+                show_error("Cliente o servicio inválido.")
+                return
+            self.db.execute(
+                "INSERT INTO citas (cliente_id, servicio_id, fecha, hora) VALUES (%s, %s, %s, %s)",
+                (cid, sid, fecha, hora), commit=True
+            )
+            show_info("Cita agendada.")
+            self.cargar()
+        except Exception:
+            pass
 
-    tree.bind("<<TreeviewSelect>>", seleccionar_cita)
-    cursor.execute("SELECT nombre FROM clientes")
-    combo_cliente["values"] = [row[0] for row in cursor.fetchall()]
-    cursor.execute("SELECT descripcion FROM servicios")
-    combo_servicio["values"] = [row[0] for row in cursor.fetchall()]
-    cargar_citas()
+    def actualizar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione una cita.")
+            return
+        cita_id = self.tree.item(sel[0])["values"][0]
+        cliente = self.combo_cliente.get().strip()
+        servicio = self.combo_servicio.get().strip()
+        fecha = self.entry_fecha.get().strip()
+        hora = self.entry_hora.get().strip()
 
-login_win = tk.Tk()
-login_win.title("Login - Barbería El Mapache Bigotón")
-login_win.geometry("380x250")
-login_win.configure(bg="#ECEFF1")
-configurar_estilos()
-tk.Label(login_win, text="🔑 Iniciar Sesión", font=("Segoe UI", 18, "bold"), bg="#ECEFF1", fg="#0D47A1").pack(pady=15)
-ttk.Label(login_win, text="Usuario:").pack()
-entry_user = ttk.Entry(login_win)
-entry_user.pack(pady=5)
-ttk.Label(login_win, text="Contraseña:").pack()
-entry_pass = ttk.Entry(login_win, show="*")
-entry_pass.pack(pady=5)
-ttk.Button(login_win, text="Ingresar", command=login).pack(pady=20)
-login_win.mainloop()
+        if not cliente or not servicio or not DATE_PATTERN.match(fecha) or not TIME_PATTERN.match(hora):
+            show_error("Complete Cliente, Servicio, Fecha (AAAA-MM-DD) y Hora (HH:MM:SS).")
+            return
+
+        try:
+            cid = self._resolve_cliente_id(cliente)
+            sid = self._resolve_servicio_id(servicio)
+            if not cid or not sid:
+                show_error("Cliente o servicio inválido.")
+                return
+            self.db.execute(
+                "UPDATE citas SET cliente_id=%s, servicio_id=%s, fecha=%s, hora=%s WHERE id=%s",
+                (cid, sid, fecha, hora, cita_id), commit=True
+            )
+            show_info("Cita actualizada.")
+            self.cargar()
+        except Exception:
+            pass
+
+    def eliminar(self):
+        sel = self.tree.selection()
+        if not sel:
+            show_error("Seleccione una cita.")
+            return
+        cita_id = self.tree.item(sel[0])["values"][0]
+        if not ask_yes_no("¿Eliminar cita seleccionada?"):
+            return
+        try:
+            self.db.execute("DELETE FROM citas WHERE id=%s", (cita_id,), commit=True)
+            show_info("Cita eliminada.")
+            self.cargar()
+        except Exception:
+            pass
+
+    def on_select(self, _):
+        sel = self.tree.selection()
+        if not sel: return
+        v = self.tree.item(sel[0])["values"]
+        self.combo_cliente.set(v[1])
+        self.combo_servicio.set(v[2])
+        self.entry_fecha.delete(0, tk.END); self.entry_fecha.insert(0, v[3])
+        self.entry_hora.delete(0, tk.END); self.entry_hora.insert(0, v[4])
+
+# ------------------------------
+# App
+# ------------------------------
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Login - Barbería El Mapache Bigotón")
+        self.geometry("420x260")
+        configure_styles()
+
+        self.db = DB()
+
+        self.login_frame = LoginView(self, self.db, on_success=self.open_menu)
+        self.login_frame.pack(expand=True, fill="both")
+
+    def open_menu(self):
+        # Destruye el frame de login y abre el menú como Toplevel
+        self.login_frame.destroy()
+        MenuView(self, self.db)
+
+    def on_closing(self):
+        try:
+            self.db.close()
+        finally:
+            self.destroy()
+
+if __name__ == "__main__":
+    app = App()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app.mainloop()
